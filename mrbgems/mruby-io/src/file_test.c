@@ -19,9 +19,9 @@
   #define LSTAT lstat
   #include <sys/file.h>
   #include <sys/param.h>
-  #include <sys/wait.h>
+  // #include <sys/wait.h>
   #include <libgen.h>
-  #include <pwd.h>
+  //#include <pwd.h>
   #include <unistd.h>
 #endif
 

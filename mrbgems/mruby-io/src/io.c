@@ -46,7 +46,7 @@
   #endif
 
 #else
-  #include <sys/wait.h>
+  //#include <sys/wait.h>
   #include <sys/time.h>
   #include <unistd.h>
   typedef size_t fsize_t;
@@ -94,27 +94,6 @@ io_get_open_fptr(mrb_state *mrb, mrb_value self)
     mrb_raise(mrb, E_IO_ERROR, "closed stream.");
   }
   return fptr;
-}
-
-static void
-io_set_process_status(mrb_state *mrb, pid_t pid, int status)
-{
-  struct RClass *c_process, *c_status;
-  mrb_value v;
-
-  c_status = NULL;
-  if (mrb_class_defined_id(mrb, MRB_SYM(Process))) {
-    c_process = mrb_module_get_id(mrb, MRB_SYM(Process));
-    if (mrb_const_defined(mrb, mrb_obj_value(c_process), MRB_SYM(Status))) {
-      c_status = mrb_class_get_under_id(mrb, c_process, MRB_SYM(Status));
-    }
-  }
-  if (c_status != NULL) {
-    v = mrb_funcall_id(mrb, mrb_obj_value(c_status), MRB_SYM(new), 2, mrb_fixnum_value(pid), mrb_fixnum_value(status));
-  } else {
-    v = mrb_fixnum_value(WEXITSTATUS(status));
-  }
-  mrb_gv_set(mrb, mrb_intern_lit(mrb, "$?"), v);
 }
 
 static int
@@ -250,52 +229,6 @@ mrb_fd_cloexec(mrb_state *mrb, int fd)
   }
 #endif
 }
-
-#if !defined(_WIN32) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
-static int
-mrb_cloexec_pipe(mrb_state *mrb, int fildes[2])
-{
-  int ret;
-  ret = pipe(fildes);
-  if (ret == -1)
-    return -1;
-  mrb_fd_cloexec(mrb, fildes[0]);
-  mrb_fd_cloexec(mrb, fildes[1]);
-  return ret;
-}
-
-static int
-mrb_pipe(mrb_state *mrb, int pipes[2])
-{
-  int ret;
-  ret = mrb_cloexec_pipe(mrb, pipes);
-  if (ret == -1) {
-    if (errno == EMFILE || errno == ENFILE) {
-      mrb_garbage_collect(mrb);
-      ret = mrb_cloexec_pipe(mrb, pipes);
-    }
-  }
-  return ret;
-}
-
-static int
-mrb_proc_exec(const char *pname)
-{
-  const char *s;
-  s = pname;
-
-  while (*s == ' ' || *s == '\t' || *s == '\n')
-    s++;
-
-  if (!*s) {
-    errno = ENOENT;
-    return -1;
-  }
-
-  execl("/bin/sh", "sh", "-c", pname, (char *)NULL);
-  return -1;
-}
-#endif
 
 static void
 mrb_io_free(mrb_state *mrb, void *ptr)
@@ -462,194 +395,8 @@ mrb_io_s_popen(mrb_state *mrb, mrb_value klass)
   return io;
 }
 #else
-static mrb_value
-mrb_io_s_popen(mrb_state *mrb, mrb_value klass)
-{
-  mrb_value io, result;
-  int doexec;
-  int opt_in, opt_out, opt_err;
-  const char *cmd;
-
-  struct mrb_io *fptr;
-  int pid, flags, fd, write_fd = -1;
-  int pr[2] = { -1, -1 };
-  int pw[2] = { -1, -1 };
-  int saved_errno;
-
-  io = mrb_io_s_popen_args(mrb, klass, &cmd, &flags, &doexec,
-                           &opt_in, &opt_out, &opt_err);
-
-  if (OPEN_READABLE_P(flags)) {
-    if (pipe(pr) == -1) {
-      mrb_sys_fail(mrb, "pipe");
-    }
-    mrb_fd_cloexec(mrb, pr[0]);
-    mrb_fd_cloexec(mrb, pr[1]);
-  }
-
-  if (OPEN_WRITABLE_P(flags)) {
-    if (pipe(pw) == -1) {
-      if (pr[0] != -1) close(pr[0]);
-      if (pr[1] != -1) close(pr[1]);
-      mrb_sys_fail(mrb, "pipe");
-    }
-    mrb_fd_cloexec(mrb, pw[0]);
-    mrb_fd_cloexec(mrb, pw[1]);
-  }
-
-  if (!doexec) {
-    // XXX
-    fflush(stdin);
-    fflush(stdout);
-    fflush(stderr);
-  }
-
-  result = mrb_nil_value();
-  switch (pid = fork()) {
-    case 0: /* child */
-      if (opt_in != -1) {
-        dup2(opt_in, 0);
-      }
-      if (opt_out != -1) {
-        dup2(opt_out, 1);
-      }
-      if (opt_err != -1) {
-        dup2(opt_err, 2);
-      }
-      if (OPEN_READABLE_P(flags)) {
-        close(pr[0]);
-        if (pr[1] != 1) {
-          dup2(pr[1], 1);
-          close(pr[1]);
-        }
-      }
-      if (OPEN_WRITABLE_P(flags)) {
-        close(pw[1]);
-        if (pw[0] != 0) {
-          dup2(pw[0], 0);
-          close(pw[0]);
-        }
-      }
-      if (doexec) {
-        for (fd = 3; fd < NOFILE; fd++) {
-          close(fd);
-        }
-        mrb_proc_exec(cmd);
-        mrb_raisef(mrb, E_IO_ERROR, "command not found: %s", cmd);
-        _exit(127);
-      }
-      result = mrb_nil_value();
-      break;
-
-    default: /* parent */
-      if (OPEN_RDWR_P(flags)) {
-        close(pr[1]);
-        fd = pr[0];
-        close(pw[0]);
-        write_fd = pw[1];
-      } else if (OPEN_RDONLY_P(flags)) {
-        close(pr[1]);
-        fd = pr[0];
-      } else {
-        close(pw[0]);
-        fd = pw[1];
-      }
-
-      mrb_iv_set(mrb, io, mrb_intern_lit(mrb, "@buf"), mrb_str_new_cstr(mrb, ""));
-
-      fptr = mrb_io_alloc(mrb);
-      fptr->fd = fd;
-      fptr->fd2 = write_fd;
-      fptr->pid = pid;
-      fptr->readable = OPEN_READABLE_P(flags);
-      fptr->writable = OPEN_WRITABLE_P(flags);
-      fptr->sync = 0;
-
-      DATA_TYPE(io) = &mrb_io_type;
-      DATA_PTR(io)  = fptr;
-      result = io;
-      break;
-
-    case -1: /* error */
-      saved_errno = errno;
-      if (OPEN_READABLE_P(flags)) {
-        close(pr[0]);
-        close(pr[1]);
-      }
-      if (OPEN_WRITABLE_P(flags)) {
-        close(pw[0]);
-        close(pw[1]);
-      }
-      errno = saved_errno;
-      mrb_sys_fail(mrb, "pipe_open failed.");
-      break;
-  }
-  return result;
-}
 #endif /* _WIN32 */
 #endif /* TARGET_OS_IPHONE */
-
-static int
-mrb_dup(mrb_state *mrb, int fd, mrb_bool *failed)
-{
-  int new_fd;
-
-  *failed = TRUE;
-  if (fd < 0)
-    return fd;
-
-  new_fd = dup(fd);
-  if (new_fd > 0) *failed = FALSE;
-  return new_fd;
-}
-
-static mrb_value
-mrb_io_initialize_copy(mrb_state *mrb, mrb_value copy)
-{
-  mrb_value orig = mrb_get_arg1(mrb);
-  mrb_value buf;
-  struct mrb_io *fptr_copy;
-  struct mrb_io *fptr_orig;
-  mrb_bool failed = TRUE;
-
-  fptr_orig = io_get_open_fptr(mrb, orig);
-  fptr_copy = (struct mrb_io *)DATA_PTR(copy);
-  if (fptr_orig == fptr_copy) return copy;
-  if (fptr_copy != NULL) {
-    fptr_finalize(mrb, fptr_copy, FALSE);
-    mrb_free(mrb, fptr_copy);
-  }
-  fptr_copy = (struct mrb_io *)mrb_io_alloc(mrb);
-
-  DATA_TYPE(copy) = &mrb_io_type;
-  DATA_PTR(copy) = fptr_copy;
-
-  buf = mrb_iv_get(mrb, orig, mrb_intern_lit(mrb, "@buf"));
-  mrb_iv_set(mrb, copy, mrb_intern_lit(mrb, "@buf"), buf);
-
-  fptr_copy->fd = mrb_dup(mrb, fptr_orig->fd, &failed);
-  if (failed) {
-    mrb_sys_fail(mrb, 0);
-  }
-  mrb_fd_cloexec(mrb, fptr_copy->fd);
-
-  if (fptr_orig->fd2 != -1) {
-    fptr_copy->fd2 = mrb_dup(mrb, fptr_orig->fd2, &failed);
-    if (failed) {
-      close(fptr_copy->fd);
-      mrb_sys_fail(mrb, 0);
-    }
-    mrb_fd_cloexec(mrb, fptr_copy->fd2);
-  }
-
-  fptr_copy->pid = fptr_orig->pid;
-  fptr_copy->readable = fptr_orig->readable;
-  fptr_copy->writable = fptr_orig->writable;
-  fptr_copy->sync = fptr_orig->sync;
-  fptr_copy->is_socket = fptr_orig->is_socket;
-
-  return copy;
-}
 
 static void
 check_file_descriptor(mrb_state *mrb, mrb_int fd)
@@ -769,28 +516,6 @@ fptr_finalize(mrb_state *mrb, struct mrb_io *fptr, int quiet)
       }
     }
     fptr->fd2 = -1;
-  }
-
-  if (fptr->pid != 0) {
-#if !defined(_WIN32) && !defined(_WIN64)
-    pid_t pid;
-    int status;
-    do {
-      pid = waitpid(fptr->pid, &status, 0);
-    } while (pid == -1 && errno == EINTR);
-    if (!quiet && pid == fptr->pid) {
-      io_set_process_status(mrb, pid, status);
-    }
-#else
-    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, fptr->pid);
-    DWORD status;
-    if (WaitForSingleObject(h, INFINITE) && GetExitCodeProcess(h, &status))
-      if (!quiet)
-        io_set_process_status(mrb, fptr->pid, (int)status);
-    CloseHandle(h);
-#endif
-    fptr->pid = 0;
-    /* Note: we don't raise an exception when waitpid(3) fails */
   }
 
   if (!quiet && saved_errno != 0) {
@@ -1112,44 +837,6 @@ mrb_io_read_data_pending(mrb_state *mrb, mrb_value io)
   }
   return 0;
 }
-
-#if !defined(_WIN32) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
-static mrb_value
-mrb_io_s_pipe(mrb_state *mrb, mrb_value klass)
-{
-  mrb_value r = mrb_nil_value();
-  mrb_value w = mrb_nil_value();
-  struct mrb_io *fptr_r;
-  struct mrb_io *fptr_w;
-  int pipes[2];
-
-  if (mrb_pipe(mrb, pipes) == -1) {
-    mrb_sys_fail(mrb, "pipe");
-  }
-
-  r = mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_ptr(klass), NULL, &mrb_io_type));
-  mrb_iv_set(mrb, r, mrb_intern_lit(mrb, "@buf"), mrb_str_new_cstr(mrb, ""));
-  fptr_r = mrb_io_alloc(mrb);
-  fptr_r->fd = pipes[0];
-  fptr_r->readable = 1;
-  fptr_r->writable = 0;
-  fptr_r->sync = 0;
-  DATA_TYPE(r) = &mrb_io_type;
-  DATA_PTR(r)  = fptr_r;
-
-  w = mrb_obj_value(mrb_data_object_alloc(mrb, mrb_class_ptr(klass), NULL, &mrb_io_type));
-  mrb_iv_set(mrb, w, mrb_intern_lit(mrb, "@buf"), mrb_str_new_cstr(mrb, ""));
-  fptr_w = mrb_io_alloc(mrb);
-  fptr_w->fd = pipes[1];
-  fptr_w->readable = 0;
-  fptr_w->writable = 1;
-  fptr_w->sync = 1;
-  DATA_TYPE(w) = &mrb_io_type;
-  DATA_PTR(w)  = fptr_w;
-
-  return mrb_assoc_new(mrb, r, w);
-}
-#endif
 
 static mrb_value
 mrb_io_s_select(mrb_state *mrb, mrb_value klass)
@@ -1526,17 +1213,12 @@ mrb_init_io(mrb_state *mrb)
   MRB_SET_INSTANCE_TT(io, MRB_TT_DATA);
 
   mrb_include_module(mrb, io, mrb_module_get(mrb, "Enumerable")); /* 15.2.20.3 */
-  mrb_define_class_method(mrb, io, "_popen",  mrb_io_s_popen,   MRB_ARGS_ARG(1,2));
   mrb_define_class_method(mrb, io, "_sysclose",  mrb_io_s_sysclose, MRB_ARGS_REQ(1));
   mrb_define_class_method(mrb, io, "for_fd",  mrb_io_s_for_fd,   MRB_ARGS_ARG(1,2));
   mrb_define_class_method(mrb, io, "select",  mrb_io_s_select,  MRB_ARGS_ARG(1,3));
   mrb_define_class_method(mrb, io, "sysopen", mrb_io_s_sysopen, MRB_ARGS_ARG(1,2));
-#if !defined(_WIN32) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
-  mrb_define_class_method(mrb, io, "_pipe", mrb_io_s_pipe, MRB_ARGS_NONE());
-#endif
 
   mrb_define_method(mrb, io, "initialize", mrb_io_initialize, MRB_ARGS_ARG(1,2));    /* 15.2.20.5.21 (x)*/
-  mrb_define_method(mrb, io, "initialize_copy", mrb_io_initialize_copy, MRB_ARGS_REQ(1));
   mrb_define_method(mrb, io, "_check_readable", mrb_io_check_readable, MRB_ARGS_NONE());
   mrb_define_method(mrb, io, "isatty",     mrb_io_isatty,     MRB_ARGS_NONE());
   mrb_define_method(mrb, io, "sync",       mrb_io_sync,       MRB_ARGS_NONE());

@@ -176,13 +176,13 @@ mrb_free_context(mrb_state *mrb, struct mrb_context *c)
   mrb_free(mrb, c);
 }
 
-int mrb_protect_atexit(mrb_state *mrb);
+/* int mrb_protect_atexit(mrb_state *mrb); */
 
   MRB_API void
 mrb_close(mrb_state *mrb)
 {
   if (!mrb) return;
-  mrb_protect_atexit(mrb);
+  /* mrb_protect_atexit(mrb); */
 
   /* free */
   mrb_gc_destroy(mrb, &mrb->gc);
